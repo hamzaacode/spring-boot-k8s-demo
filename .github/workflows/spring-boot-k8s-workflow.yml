@@ -59,22 +59,12 @@ jobs:
         key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
         restore-keys: ${{ runner.os }}-m2
 
-    - name: Check Java version
-      id: java-check
+    - name: Set Java 17 as default
       run: |
-        if java -version 2>&1 | grep -q "openjdk version \"17"; then
-          echo "java-available=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "java-available=false" >> "$GITHUB_OUTPUT"
-        fi
-
-    - name: Set up JDK 17
-      if: steps.java-check.outputs.java-available != 'true'
-      uses: actions/setup-java@v4
-      with:
-        java-version: '17'
-        distribution: 'temurin'
-        cache: maven
+        echo "Setting up Java 17..."
+        export JAVA_HOME="/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home"
+        export PATH="$JAVA_HOME/bin:$PATH"
+        java -version
 
     - name: Build fat JAR
       run: |

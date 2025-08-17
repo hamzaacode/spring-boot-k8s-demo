@@ -23,32 +23,9 @@ jobs:
   build-and-deploy:
     runs-on: self-hosted
     steps:
-    # Checkout should be the first step
     - uses: actions/checkout@v4
       with:
         fetch-depth: 0
-        
-    - name: Setup Git Repository
-      run: |
-        echo "Current directory: $(pwd)"
-        # Initialize git if needed
-        if [ ! -d ".git" ]; then
-          git init
-          git remote add origin https://github.com/${{ github.repository }}.git
-          git fetch
-          git checkout -f ${{ github.ref }}
-        fi
-        
-    - name: Verify Repository Setup
-      run: |
-        echo "Repository contents:"
-        ls -la
-        echo "Git status:"
-        git status || true
-        echo "Git branch:"
-        git branch || true
-        echo "Git remote:"
-        git remote -v || true
         
     - name: Initial Diagnostics
       run: |
@@ -74,13 +51,6 @@ jobs:
         
         # Check kubectl context
         kubectl config current-context || echo "No kubectl context set"
-        
-    - name: Verify Repository Content
-      run: |
-        echo "Repository contents:"
-        ls -la
-        echo "Git status:"
-        git status
 
     - name: Cache Maven packages
       uses: actions/cache@v4

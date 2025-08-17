@@ -3,21 +3,25 @@ name: Spring Boot K8s Workflow
 on:
   push:
     branches: [ master ]
-  pull_request:
-    branches: [ master ]
+    paths:
+      - 'src/**'
+      - 'pom.xml'
+      - 'Dockerfile'
+      - 'k8s.yaml'
+      - '.github/workflows/spring-boot-k8s-workflow.yml'
   workflow_dispatch:
 
 env:
-  DOCKER_IMAGE: spring-boot-k8s-demo
-  DOCKER_TAG: latest
+  IMAGE_TAG: spring-boot-k8s-demo:latest
+  DEPLOY_DIR: .
+
+concurrency:
+  group: spring-boot-deploy
+  cancel-in-progress: true
 
 jobs:
   build-and-deploy:
     runs-on: self-hosted
-    defaults:
-      run:
-        shell: bash
-        working-directory: ${{ github.workspace }}
     steps:
     # Checkout should be the first step
     - uses: actions/checkout@v4
@@ -92,42 +96,40 @@ jobs:
         distribution: 'temurin'
         cache: maven
 
-    - name: Build with Maven (Development Mode)
+    - name: Build fat JAR
       run: |
-        echo "Preparing Maven build..."
-        # Ensure we're in the right directory
-        pwd
-        ls -la
-        
-        # Make mvnw executable and verify it exists
-        echo "Making mvnw executable..."
+        set -euxo pipefail
+        echo "Building JAR file..."
         chmod +x ./mvnw
-        ls -l ./mvnw
-        
-        # Verify Maven wrapper properties
-        echo "Checking Maven wrapper..."
-        ls -l .mvn/wrapper/maven-wrapper.properties || echo "Maven wrapper properties not found"
-        
-        # Clean and package with detailed output
-        echo "Starting Maven build..."
         ./mvnw clean package \
           -DskipTests \
           -T 1C \
-          -Dspring.profiles.active=dev \
-          -Dmaven.test.skip=true \
-          -X
+          --batch-mode \
+          --no-transfer-progress \
+          -Dmaven.javadoc.skip=true \
+          -Dmaven.source.skip=true
         
-        # Verify JAR file exists
-        ls -l target/*.jar || echo "JAR file not created"
+        echo "Verifying JAR file..."
+        ls -l target/*.jar || { echo "JAR file not created"; exit 1; }
 
-    - name: Setup Minikube
+    - name: Setup Minikube with retries
       run: |
-        # Start Minikube if not running
-        if ! minikube status; then
-          echo "Starting Minikube..."
-          minikube start --driver=docker
-          echo "Waiting for Minikube to be ready..."
-          sleep 30
+        set -euxo pipefail
+        
+        MAX_RETRIES=3
+        RETRY_COUNT=0
+        
+        until minikube status || [ $RETRY_COUNT -eq $MAX_RETRIES ]; do
+          echo "Attempt $((RETRY_COUNT + 1)) of $MAX_RETRIES to start Minikube"
+          minikube delete || true
+          minikube start --driver=docker --kubernetes-version=stable
+          RETRY_COUNT=$((RETRY_COUNT + 1))
+          sleep 10
+        done
+        
+        if [ $RETRY_COUNT -eq $MAX_RETRIES ] && ! minikube status; then
+          echo "Failed to start Minikube after $MAX_RETRIES attempts"
+          exit 1
         fi
         
         # Set docker env
@@ -138,44 +140,84 @@ jobs:
         docker info
         minikube status
 
-    - name: Build Docker image
+    - name: Build Docker image with BuildKit
+      env:
+        DOCKER_BUILDKIT: 1
       run: |
-        docker build -t ${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }} .
+        set -euxo pipefail
+        docker build \
+          --cache-from ${{ env.IMAGE_TAG }} \
+          --build-arg BUILDKIT_INLINE_CACHE=1 \
+          -t ${{ env.IMAGE_TAG }} \
+          .
         echo "Docker image built successfully"
+        docker images | grep spring-boot-k8s-demo
 
     - name: Deploy to Minikube
       run: |
-        # Delete existing deployment if it exists
-        kubectl delete deployment spring-boot-k8s-demo --ignore-not-found
+        set -euxo pipefail
         
-        # Apply the new configuration
+        echo "Cleaning up any existing deployments..."
+        kubectl delete deployment spring-boot-k8s-demo --ignore-not-found
+        kubectl delete service spring-boot-k8s-demo --ignore-not-found
+        
+        echo "Applying Kubernetes configurations..."
         kubectl apply -f k8s.yaml
         
-        # Wait for the deployment to be ready
-        kubectl rollout status deployment/spring-boot-k8s-demo --timeout=120s
+        echo "Waiting for deployment to be ready..."
+        if ! kubectl rollout status deployment/spring-boot-k8s-demo --timeout=180s; then
+          echo "Deployment failed. Checking pod status and logs..."
+          kubectl describe pods -l app=spring-boot-k8s-demo
+          kubectl logs -l app=spring-boot-k8s-demo --all-containers=true
+          exit 1
+        fi
         
-        # Get deployment status
-        kubectl get deployment spring-boot-k8s-demo
+        echo "Checking deployment status..."
+        kubectl get deployment spring-boot-k8s-demo -o wide
+        kubectl get pods -l app=spring-boot-k8s-demo -o wide
         
-        # Get pod status
-        kubectl get pods -l app=spring-boot-k8s-demo
-        
-        # Get the service URL
-        echo "Application URL:"
+        echo "Getting service URL..."
         minikube service spring-boot-k8s-demo --url
 
     - name: Verify Deployment
       run: |
-        # Wait for the service to be ready
-        sleep 10
+        set -euxo pipefail
         
-        # Get service URL
-        URL=$(minikube service spring-boot-k8s-demo --url)
+        echo "Waiting for service to be fully ready..."
+        sleep 15
         
-        # Test the endpoint
-        curl -s $URL/hello || echo "Warning: Application not responding"
+        # Get service URL with retry
+        MAX_RETRIES=3
+        RETRY_COUNT=0
+        until URL=$(minikube service spring-boot-k8s-demo --url) || [ $RETRY_COUNT -eq $MAX_RETRIES ]; do
+          echo "Attempt $((RETRY_COUNT + 1)) of $MAX_RETRIES to get service URL"
+          sleep 5
+          RETRY_COUNT=$((RETRY_COUNT + 1))
+        done
         
-        # Show logs from the pod
-        POD=$(kubectl get pods -l app=spring-boot-k8s-demo -o jsonpath="{.items[0].metadata.name}")
-        echo "Application logs:"
-        kubectl logs $POD
+        if [ -z "$URL" ]; then
+          echo "Failed to get service URL"
+          exit 1
+        fi
+        
+        echo "Testing application endpoints..."
+        # Test with retry logic
+        MAX_RETRIES=5
+        RETRY_COUNT=0
+        until curl -s --fail "$URL/hello" || [ $RETRY_COUNT -eq $MAX_RETRIES ]; do
+          echo "Attempt $((RETRY_COUNT + 1)) of $MAX_RETRIES to reach application"
+          sleep 10
+          RETRY_COUNT=$((RETRY_COUNT + 1))
+        done
+        
+        if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
+          echo "Application health check failed. Gathering diagnostics..."
+          kubectl get events --sort-by='.lastTimestamp'
+          kubectl describe pods -l app=spring-boot-k8s-demo
+          POD=$(kubectl get pods -l app=spring-boot-k8s-demo -o jsonpath="{.items[0].metadata.name}")
+          echo "Application logs:"
+          kubectl logs $POD --all-containers=true
+          exit 1
+        fi
+        
+        echo "Deployment verification successful!"

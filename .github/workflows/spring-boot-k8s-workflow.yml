@@ -53,11 +53,13 @@ jobs:
         kubectl config current-context || echo "No kubectl context set"
 
     - name: Cache Maven packages
+      id: maven-cache
       uses: actions/cache@v4
       with:
         path: ~/.m2
         key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
         restore-keys: ${{ runner.os }}-m2
+      continue-on-error: true  # Don't fail the build if caching fails
 
     - name: Set Java 17 as default
       run: |
@@ -193,3 +195,28 @@ jobs:
           kill $(cat port-forward.pid) || true
           rm port-forward.pid
         fi
+
+    - name: Cleanup
+      if: always()  # Run this step even if previous steps fail
+      run: |
+        set +e  # Don't exit on error during cleanup
+        
+        echo "Cleaning up resources..."
+        
+        # Kill any remaining port-forward processes
+        pkill -f "kubectl port-forward" || true
+        
+        # Clean up any port-forward PID files
+        rm -f port-forward.pid
+        
+        # Clean up Minikube resources
+        kubectl delete deployment spring-boot-k8s-demo --ignore-not-found
+        kubectl delete service spring-boot-k8s-demo --ignore-not-found
+        
+        # Clear Docker build cache if needed
+        docker system prune -f
+        
+        # Remove any leftover files
+        rm -rf target/
+        
+        echo "Cleanup completed"

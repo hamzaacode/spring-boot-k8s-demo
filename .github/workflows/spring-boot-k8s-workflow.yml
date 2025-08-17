@@ -24,15 +24,27 @@ jobs:
       with:
         fetch-depth: 0
         
-    - name: Verify Git Repository
+    - name: Setup Git Repository
       run: |
         echo "Current directory: $(pwd)"
+        # Initialize git if needed
+        if [ ! -d ".git" ]; then
+          git init
+          git remote add origin https://github.com/${{ github.repository }}.git
+          git fetch
+          git checkout -f ${{ github.ref }}
+        fi
+        
+    - name: Verify Repository Setup
+      run: |
         echo "Repository contents:"
         ls -la
-        echo "Git repository status:"
-        git status
-        echo "Git remote information:"
-        git remote -v
+        echo "Git status:"
+        git status || true
+        echo "Git branch:"
+        git branch || true
+        echo "Git remote:"
+        git remote -v || true
         
     - name: Initial Diagnostics
       run: |
@@ -82,16 +94,28 @@ jobs:
 
     - name: Build with Maven (Development Mode)
       run: |
-        # Make mvnw executable
-        chmod +x ./mvnw
+        echo "Preparing Maven build..."
+        # Ensure we're in the right directory
+        pwd
+        ls -la
         
-        # Clean and package
+        # Make mvnw executable and verify it exists
+        echo "Making mvnw executable..."
+        chmod +x ./mvnw
+        ls -l ./mvnw
+        
+        # Verify Maven wrapper properties
+        echo "Checking Maven wrapper..."
+        ls -l .mvn/wrapper/maven-wrapper.properties || echo "Maven wrapper properties not found"
+        
+        # Clean and package with detailed output
+        echo "Starting Maven build..."
         ./mvnw clean package \
           -DskipTests \
           -T 1C \
           -Dspring.profiles.active=dev \
           -Dmaven.test.skip=true \
-          --no-transfer-progress
+          -X
         
         # Verify JAR file exists
         ls -l target/*.jar || echo "JAR file not created"

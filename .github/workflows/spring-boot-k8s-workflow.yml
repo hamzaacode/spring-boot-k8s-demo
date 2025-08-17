@@ -3,8 +3,14 @@ name: Spring Boot K8s Workflow
 on:
   push:
     branches: [ master ]
+    paths:
+      - 'src/**'
+      - 'pom.xml'
+      - 'Dockerfile'
+      - 'k8s.yaml'
   pull_request:
     branches: [ master ]
+  workflow_dispatch:
 
 env:
   DOCKER_IMAGE: spring-boot-k8s-demo
@@ -16,6 +22,13 @@ jobs:
     steps:
     - uses: actions/checkout@v2
 
+    - name: Cache Maven packages
+      uses: actions/cache@v2
+      with:
+        path: ~/.m2
+        key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+        restore-keys: ${{ runner.os }}-m2
+
     - name: Set up JDK 17
       uses: actions/setup-java@v2
       with:
@@ -23,13 +36,24 @@ jobs:
         distribution: 'temurin'
         cache: maven
 
-    - name: Build with Maven
-      run: ./mvnw clean package -DskipTests
-
-    - name: Configure Minikube environment
+    - name: Build with Maven (Development Mode)
       run: |
+        ./mvnw package \
+          -DskipTests \
+          -T 1C \
+          -Dspring.profiles.active=dev \
+          -Dmaven.test.skip=true
+
+    - name: Verify Minikube & Docker Status
+      run: |
+        minikube status
+        if [ $? -ne 0 ]; then
+          echo "Starting Minikube..."
+          minikube start
+        fi
         eval $(minikube docker-env)
-        echo "Using Minikube's Docker daemon"
+        echo "Connected to Minikube's Docker daemon"
+        docker info
 
     - name: Build Docker image
       run: |
@@ -38,16 +62,37 @@ jobs:
 
     - name: Deploy to Minikube
       run: |
-        # Apply the Kubernetes configuration
+        # Delete existing deployment if it exists
+        kubectl delete deployment spring-boot-k8s-demo --ignore-not-found
+        
+        # Apply the new configuration
         kubectl apply -f k8s.yaml
         
         # Wait for the deployment to be ready
-        kubectl rollout status deployment/spring-boot-k8s-demo
+        kubectl rollout status deployment/spring-boot-k8s-demo --timeout=120s
+        
+        # Get deployment status
+        kubectl get deployment spring-boot-k8s-demo
+        
+        # Get pod status
+        kubectl get pods -l app=spring-boot-k8s-demo
         
         # Get the service URL
+        echo "Application URL:"
         minikube service spring-boot-k8s-demo --url
+
+    - name: Verify Deployment
+      run: |
+        # Wait for the service to be ready
+        sleep 10
         
-        # Display pod status
-        kubectl get pods
+        # Get service URL
+        URL=$(minikube service spring-boot-k8s-demo --url)
         
-        echo "Deployment completed successfully"
+        # Test the endpoint
+        curl -s $URL/hello || echo "Warning: Application not responding"
+        
+        # Show logs from the pod
+        POD=$(kubectl get pods -l app=spring-boot-k8s-demo -o jsonpath="{.items[0].metadata.name}")
+        echo "Application logs:"
+        kubectl logs $POD

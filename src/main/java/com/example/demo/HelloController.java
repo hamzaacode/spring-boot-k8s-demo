@@ -1,4 +1,4 @@
-package com.example.spring_boot_k8s_demo;
+package com.example.demo;
 
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;

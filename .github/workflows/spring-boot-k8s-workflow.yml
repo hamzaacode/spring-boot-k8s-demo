@@ -3,11 +3,6 @@ name: Spring Boot K8s Workflow
 on:
   push:
     branches: [ master ]
-    paths:
-      - 'src/**'
-      - 'pom.xml'
-      - 'Dockerfile'
-      - 'k8s.yaml'
   pull_request:
     branches: [ master ]
   workflow_dispatch:
@@ -19,8 +14,28 @@ env:
 jobs:
   build-and-deploy:
     runs-on: self-hosted
+    defaults:
+      run:
+        shell: bash
     steps:
+    - name: Initial Diagnostics
+      run: |
+        echo "Current directory: $(pwd)"
+        echo "Runner user: $(whoami)"
+        echo "Environment variables:"
+        env
+        echo "GitHub workspace: $GITHUB_WORKSPACE"
+        
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+        
+    - name: Verify Repository Content
+      run: |
+        echo "Repository contents:"
+        ls -la
+        echo "Git status:"
+        git status
 
     - name: Cache Maven packages
       uses: actions/cache@v4

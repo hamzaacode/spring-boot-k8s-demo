@@ -59,7 +59,17 @@ jobs:
         key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
         restore-keys: ${{ runner.os }}-m2
 
+    - name: Check Java version
+      id: java-check
+      run: |
+        if java -version 2>&1 | grep -q "openjdk version \"17"; then
+          echo "java-available=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "java-available=false" >> "$GITHUB_OUTPUT"
+        fi
+
     - name: Set up JDK 17
+      if: steps.java-check.outputs.java-available != 'true'
       uses: actions/setup-java@v4
       with:
         java-version: '17'

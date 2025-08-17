@@ -23,6 +23,11 @@ jobs:
   build-and-deploy:
     runs-on: self-hosted
     steps:
+    - name: Clean diagnostic logs
+      run: |
+        echo "Cleaning up old diagnostic logs..."
+        rm -rf /Users/md.amirhamza/spring-k8s-runner/_diag/* || true
+        
     - uses: actions/checkout@v4
       with:
         fetch-depth: 0
@@ -218,5 +223,8 @@ jobs:
         
         # Remove any leftover files
         rm -rf target/
+        
+        # Clean up diagnostic logs
+        rm -rf /Users/md.amirhamza/spring-k8s-runner/_diag/* || true
         
         echo "Cleanup completed"

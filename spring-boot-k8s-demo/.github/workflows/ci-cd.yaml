@@ -1,0 +1,38 @@
+name: CI/CD Pipeline
+
+on:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+    runs-on: self-hosted
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Build with Maven
+        run: mvn clean package -DskipTests
+
+      - name: Use Minikube Docker daemon
+        run: eval $(minikube -p minikube docker-env)
+
+      - name: Build Docker image for Minikube
+        run: docker build -t spring-boot-k8s-demo:latest .
+
+  deploy:
+    needs: build
+    runs-on: self-hosted
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Use Minikube Docker daemon
+        run: eval $(minikube -p minikube docker-env)
+
+      - name: Deploy to local Minikube
+        run: kubectl apply -f k8s.yaml

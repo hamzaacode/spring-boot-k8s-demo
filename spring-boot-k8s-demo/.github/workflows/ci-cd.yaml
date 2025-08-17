@@ -1,5 +1,5 @@
 
-name: CI/CD Pipeline
+name: spring-boot-k8s-demo-ci-cd
 on:
   push:
     branches:

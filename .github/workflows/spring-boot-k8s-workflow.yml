@@ -17,10 +17,25 @@ jobs:
     defaults:
       run:
         shell: bash
+        working-directory: ${{ github.workspace }}
     steps:
-    - name: Initial Diagnostics
+    # Checkout should be the first step
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: Verify Git Repository
       run: |
         echo "Current directory: $(pwd)"
+        echo "Repository contents:"
+        ls -la
+        echo "Git repository status:"
+        git status
+        echo "Git remote information:"
+        git remote -v
+        
+    - name: Initial Diagnostics
+      run: |
         echo "Runner user: $(whoami)"
         echo "Java version:"
         java -version || echo "Java not found"
@@ -32,10 +47,6 @@ jobs:
         minikube version || echo "Minikube not found"
         echo "Kubectl version:"
         kubectl version --client || echo "Kubectl not found"
-        
-    - uses: actions/checkout@v4
-      with:
-        fetch-depth: 1
         
     - name: System Check
       run: |

@@ -27,7 +27,14 @@ jobs:
       run: |
         echo "Cleaning up old diagnostic logs..."
         rm -rf /Users/md.amirhamza/spring-k8s-runner/_diag/* || true
-        
+
+    - name: Prepare diagnostic dir
+      run: |
+       echo "Preparing diagnostics dir..."
+       export DIAG_DIR="$RUNNER_TEMP/diag-${GITHUB_RUN_ID}"
+       mkdir -p "$DIAG_DIR"
+       echo "DIAG_DIR=$DIAG_DIR" >> $GITHUB_ENV
+
     - uses: actions/checkout@v4
       with:
         fetch-depth: 0

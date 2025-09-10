@@ -1,27 +1,28 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: spring-boot-app
+  name: spring-boot-qa
   labels:
-    name: spring-boot-app
+    name: spring-boot-qa
+    environment: qa
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: spring-boot-config
-  namespace: spring-boot-app
+  name: spring-boot-config-qa
+  namespace: spring-boot-qa
 data:
   application.yml: |
     spring:
       profiles:
-        active: ${SPRING_PROFILES_ACTIVE:dev}
+        active: qa
     server:
       port: 8080
     management:
       endpoints:
         web:
           exposure:
-            include: health,info,metrics,prometheus
+            include: health,info,metrics,env
       endpoint:
         health:
           show-details: when-authorized
@@ -29,29 +30,28 @@ data:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: spring-boot-secrets
-  namespace: spring-boot-app
+  name: spring-boot-secrets-qa
+  namespace: spring-boot-qa
 type: Opaque
 data:
-  # Base64 encoded values - replace with actual values
-  db-username: c2FfdXNlcg==  # sa_user
-  db-password: cGFzc3dvcmQ=  # password
+  db-username: cWFfdXNlcg==  # qa_user
+  db-password: cWFfcGFzcw==  # qa_pass
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: spring-boot-k8s-demo
-  namespace: spring-boot-app
+  namespace: spring-boot-qa
   labels:
     app: spring-boot-k8s-demo
-    version: v1
+    environment: qa
 spec:
   replicas: 2
   strategy:
     type: RollingUpdate
     rollingUpdate:
       maxSurge: 1
-      maxUnavailable: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       app: spring-boot-k8s-demo
@@ -59,7 +59,7 @@ spec:
     metadata:
       labels:
         app: spring-boot-k8s-demo
-        version: v1
+        environment: qa
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8080"
@@ -82,19 +82,19 @@ spec:
               protocol: TCP
           env:
             - name: SPRING_PROFILES_ACTIVE
-              value: "dev"
+              value: "qa"
             - name: DB_USERNAME
               valueFrom:
                 secretKeyRef:
-                  name: spring-boot-secrets
+                  name: spring-boot-secrets-qa
                   key: db-username
             - name: DB_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: spring-boot-secrets
+                  name: spring-boot-secrets-qa
                   key: db-password
             - name: JAVA_OPTS
-              value: "-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0"
+              value: "-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError"
           resources:
             requests:
               memory: "512Mi"
@@ -122,50 +122,41 @@ spec:
             httpGet:
               path: /actuator/health/readiness
               port: http
-              scheme: HTTP
             initialDelaySeconds: 30
             periodSeconds: 10
             timeoutSeconds: 5
-            successThreshold: 1
             failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /actuator/health/liveness
               port: http
-              scheme: HTTP
             initialDelaySeconds: 60
             periodSeconds: 20
             timeoutSeconds: 5
-            successThreshold: 1
             failureThreshold: 3
           startupProbe:
             httpGet:
               path: /actuator/health
               port: http
-              scheme: HTTP
-            initialDelaySeconds: 10
+            initialDelaySeconds: 15
             periodSeconds: 5
             timeoutSeconds: 5
-            successThreshold: 1
             failureThreshold: 30
       volumes:
         - name: tmp-volume
           emptyDir: {}
         - name: config-volume
           configMap:
-            name: spring-boot-config
+            name: spring-boot-config-qa
       terminationGracePeriodSeconds: 30
-      restartPolicy: Always
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: spring-boot-k8s-demo
-  namespace: spring-boot-app
+  namespace: spring-boot-qa
   labels:
     app: spring-boot-k8s-demo
-  annotations:
-    service.beta.kubernetes.io/aws-load-balancer-type: nlb
 spec:
   type: ClusterIP
   selector:
@@ -175,43 +166,24 @@ spec:
       protocol: TCP
       port: 8080
       targetPort: http
-  sessionAffinity: None
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: spring-boot-k8s-demo-nodeport
-  namespace: spring-boot-app
-  labels:
-    app: spring-boot-k8s-demo
-spec:
-  type: NodePort
-  selector:
-    app: spring-boot-k8s-demo
-  ports:
-    - name: http
-      protocol: TCP
-      port: 8080
-      targetPort: http
-      nodePort: 30080
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: spring-boot-k8s-demo
-  namespace: spring-boot-app
+  namespace: spring-boot-qa
   annotations:
     nginx.ingress.kubernetes.io/rewrite-target: /
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    cert-manager.io/cluster-issuer: "letsencrypt-staging"
 spec:
   ingressClassName: nginx
   tls:
     - hosts:
-        - spring-boot-demo.example.com
-      secretName: spring-boot-tls
+        - spring-boot-qa.example.com
+      secretName: spring-boot-qa-tls
   rules:
-    - host: spring-boot-demo.example.com
+    - host: spring-boot-qa.example.com
       http:
         paths:
           - path: /
@@ -222,29 +194,18 @@ spec:
                 port:
                   number: 8080
 ---
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: spring-boot-k8s-demo-pdb
-  namespace: spring-boot-app
-spec:
-  minAvailable: 1
-  selector:
-    matchLabels:
-      app: spring-boot-k8s-demo
----
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: spring-boot-k8s-demo-hpa
-  namespace: spring-boot-app
+  namespace: spring-boot-qa
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
     name: spring-boot-k8s-demo
   minReplicas: 2
-  maxReplicas: 10
+  maxReplicas: 5
   metrics:
     - type: Resource
       resource:
@@ -258,53 +219,4 @@ spec:
         target:
           type: Utilization
           averageUtilization: 80
-  behavior:
-    scaleDown:
-      stabilizationWindowSeconds: 300
-      policies:
-        - type: Percent
-          value: 50
-          periodSeconds: 60
-    scaleUp:
-      stabilizationWindowSeconds: 60
-      policies:
-        - type: Percent
-          value: 100
-          periodSeconds: 15
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: spring-boot-k8s-demo-netpol
-  namespace: spring-boot-app
-spec:
-  podSelector:
-    matchLabels:
-      app: spring-boot-k8s-demo
-  policyTypes:
-    - Ingress
-    - Egress
-  ingress:
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              name: ingress-nginx
-        - namespaceSelector:
-            matchLabels:
-              name: monitoring
-      ports:
-        - protocol: TCP
-          port: 8080
-  egress:
-    - to: []
-      ports:
-        - protocol: TCP
-          port: 53
-        - protocol: UDP
-          port: 53
-    - to: []
-      ports:
-        - protocol: TCP
-          port: 443
-        - protocol: TCP
-          port: 80
+

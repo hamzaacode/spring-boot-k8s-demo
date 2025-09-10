@@ -1,138 +1,289 @@
-name: Spring Boot K8s Workflow
+name: Spring Boot K8s CI/CD Pipeline
 
 on:
   push:
-    branches: [ master ]
+    branches: [ main, master, develop ]
     paths:
       - 'src/**'
       - 'pom.xml'
       - 'Dockerfile'
-      - 'k8s.yaml'
-      - '.github/workflows/spring-boot-k8s-workflow.yml'
+      - 'k8s/**'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'src/**'
+      - 'pom.xml'
+      - 'Dockerfile'
   workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+        - dev
+        - qa
+        - prod
 
 env:
   SERVICE_NAME: spring-boot-k8s-demo
-  K8S_FILE: k8s.yaml
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  JAVA_VERSION: '17'
+  MAVEN_OPTS: '-Xmx1024m'
 
 concurrency:
-  group: spring-boot-deploy
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build-and-deploy:
-    runs-on: self-hosted
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
     steps:
-      - name: Clean diagnostic logs
-        run: |
-          echo "Cleaning up old diagnostic logs..."
-          rm -rf /Users/md.amirhamza/spring-k8s-runner/_diag || true
-
-      - name: Prepare diagnostic dir
-        run: |
-          echo "Preparing diagnostics dir..."
-          export DIAG_DIR="$RUNNER_TEMP/diag-${GITHUB_RUN_ID}"
-          mkdir -p "$DIAG_DIR"
-          echo "DIAG_DIR=$DIAG_DIR"
-
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Compute vars
-        id: vars
-        shell: bash
-        run: |
-          echo "SHORT_SHA=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-          echo "IMAGE=${{ env.SERVICE_NAME }}:${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-          echo "IMAGE_LATEST=${{ env.SERVICE_NAME }}:latest" >> "$GITHUB_OUTPUT"
-
-      - name: Set up Temurin JDK 17 (with Maven cache)
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
-          java-version: '17'
-          cache: maven
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: 'maven'
 
-      - name: Build JAR
-        shell: bash
+      - name: Run tests
+        run: |
+          chmod +x ./mvnw
+          ./mvnw -B test --no-transfer-progress
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: target/surefire-reports/
+
+  build:
+    name: Build Application
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: always() && (needs.test.result == 'success' || github.event_name != 'pull_request')
+    outputs:
+      image-tag: ${{ steps.vars.outputs.IMAGE_TAG }}
+      image-digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: 'maven'
+
+      - name: Compute build variables
+        id: vars
+        run: |
+          echo "SHORT_SHA=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_TAG=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+          echo "VERSION=$(./mvnw help:evaluate -Dexpression=project.version -q -DforceStdout)" >> "$GITHUB_OUTPUT"
+
+      - name: Build application
+        run: |
+          chmod +x ./mvnw
+          ./mvnw -B clean package -DskipTests \
+            --no-transfer-progress \
+            -Dmaven.javadoc.skip=true \
+            -Dmaven.source.skip=true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.vars.outputs.IMAGE_TAG }}
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_DATE=${{ steps.vars.outputs.BUILD_DATE }}
+            VERSION=${{ steps.vars.outputs.VERSION }}
+            REVISION=${{ github.sha }}
+
+  deploy-dev:
+    name: Deploy to Development
+    runs-on: self-hosted
+    needs: [build]
+    if: github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' || github.event.inputs.environment == 'dev'
+    environment:
+      name: development
+      url: ${{ steps.get-url.outputs.url }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Configure environment
+        run: |
+          echo "SPRING_PROFILES_ACTIVE=dev" >> $GITHUB_ENV
+          echo "NAMESPACE=dev" >> $GITHUB_ENV
+
+      - name: Ensure Minikube is running
         run: |
           set -euo pipefail
-          chmod +x ./mvnw || true
-          ./mvnw -B -T 1C -DskipTests -Dmaven.javadoc.skip=true -Dmaven.source.skip=true clean package
-          ls -lh target/*.jar
-
-      - name: Ensure Minikube (Docker driver) is running
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker info >/dev/null
-          minikube status >/dev/null 2>&1 || minikube start --driver=docker
+          docker info >/dev/null 2>&1 || { echo "Docker is not running"; exit 1; }
+          
+          if ! minikube status >/dev/null 2>&1; then
+            echo "Starting Minikube..."
+            minikube start --driver=docker --memory=4096 --cpus=2
+          fi
+          
           kubectl config use-context minikube
-          eval "$(minikube docker-env)"
-          docker info >/dev/null
+          eval $(minikube docker-env)
 
-      - name: Build container image (short-SHA + latest)
-        env:
-          DOCKER_BUILDKIT: "1"
-        shell: bash
+      - name: Create namespace if not exists
+        run: |
+          kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy to Kubernetes
         run: |
           set -euo pipefail
-          docker build \
-            --build-arg BUILDKIT_INLINE_CACHE=1 \
-            -t "${{ steps.vars.outputs.IMAGE }}" \
-            -t "${{ steps.vars.outputs.IMAGE_LATEST }}" \
-            .
-          docker images | grep "${{ env.SERVICE_NAME }}" || true
+          
+          # Update image in deployment
+          sed -i.bak "s|image:.*|image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.image-tag }}|g" k8s.yaml
+          
+          # Apply manifests
+          kubectl apply -f k8s.yaml -n ${{ env.NAMESPACE }}
+          
+          # Wait for rollout
+          kubectl rollout status deployment/${{ env.SERVICE_NAME }} -n ${{ env.NAMESPACE }} --timeout=300s
+          
+          # Get deployment status
+          kubectl get deployment,pods,svc -l app=${{ env.SERVICE_NAME }} -n ${{ env.NAMESPACE }}
 
-      - name: Apply manifests
-        shell: bash
+      - name: Get service URL
+        id: get-url
         run: |
           set -euo pipefail
-          kubectl apply -f "${{ env.K8S_FILE }}"
-
-      - name: Rollout new image
-        shell: bash
-        run: |
-          set -euo pipefail
-          kubectl set image deployment/${{ env.SERVICE_NAME }} \
-            ${{ env.SERVICE_NAME }}=${{ steps.vars.outputs.IMAGE }} --record
-          kubectl rollout status deployment/${{ env.SERVICE_NAME }} --timeout=180s
-          kubectl get deploy/${{ env.SERVICE_NAME }} -o wide
-          kubectl get pods -l app=${{ env.SERVICE_NAME }} -o wide
-
-      - name: Determine service URL
-        id: url
-        shell: bash
-        run: |
-          set -euo pipefail
-          URL="$(minikube service ${{ env.SERVICE_NAME }} --url)"
+          URL="$(minikube service ${{ env.SERVICE_NAME }} --url -n ${{ env.NAMESPACE }})"
           echo "url=$URL" >> "$GITHUB_OUTPUT"
           echo "Service URL: $URL"
 
-      - name: Verify
-        shell: bash
+      - name: Health check
         run: |
           set -euo pipefail
-          URL="${{ steps.url.outputs.url }}"
-          echo "Checking health at: $URL/actuator/health"
-          for i in {1..10}; do
-            if curl -fsS "$URL/actuator/health" | grep -q '"status":"UP"'; then
-              echo "Health OK"
+          URL="${{ steps.get-url.outputs.url }}"
+          
+          echo "Waiting for application to be ready..."
+          for i in {1..30}; do
+            if curl -fsS --connect-timeout 5 --max-time 10 "$URL/actuator/health" 2>/dev/null | grep -q '"status":"UP"'; then
+              echo "✅ Application is healthy"
               break
             fi
-            sleep 6
+            echo "⏳ Attempt $i/30 - Application not ready yet, waiting..."
+            sleep 10
           done
-          echo "Ping /hello"
-          curl -fS "$URL/hello" && echo
+          
+          # Test API endpoints
+          echo "Testing API endpoints..."
+          curl -fsS "$URL/api/users" && echo "✅ Users API working"
+          curl -fsS "$URL/actuator/info" && echo "✅ Actuator info working"
 
-      - name: Diagnostics on failure
+      - name: Cleanup on failure
         if: failure()
-        shell: bash
         run: |
           set +e
-          kubectl get events --sort-by=.lastTimestamp | tail -n 200 || true
-          kubectl describe deploy ${{ env.SERVICE_NAME }} || true
-          kubectl describe pods -l app=${{ env.SERVICE_NAME }} || true
-          POD="$(kubectl get pods -l app=${{ env.SERVICE_NAME }} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
-          [ -n "$POD" ] && kubectl logs "$POD" --all-containers=true || true
+          echo "🔍 Gathering failure diagnostics..."
+          
+          kubectl get events --sort-by=.lastTimestamp -n ${{ env.NAMESPACE }} | tail -20
+          kubectl describe deployment ${{ env.SERVICE_NAME }} -n ${{ env.NAMESPACE }}
+          kubectl describe pods -l app=${{ env.SERVICE_NAME }} -n ${{ env.NAMESPACE }}
+          
+          POD=$(kubectl get pods -l app=${{ env.SERVICE_NAME }} -n ${{ env.NAMESPACE }} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+          if [[ -n "$POD" ]]; then
+            echo "📋 Pod logs:"
+            kubectl logs "$POD" -n ${{ env.NAMESPACE }} --tail=100
+          fi
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.event_name != 'pull_request'
+    steps:
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.image-tag }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  deploy-qa:
+    name: Deploy to QA
+    runs-on: ubuntu-latest
+    needs: [build, security-scan]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' || github.event.inputs.environment == 'qa'
+    environment:
+      name: qa
+    steps:
+      - name: Deploy to QA Environment
+        run: |
+          echo "🚀 Deploying to QA environment..."
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.image-tag }}"
+          # Add your QA deployment logic here
+
+  deploy-prod:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build, security-scan, deploy-qa]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' || github.event.inputs.environment == 'prod'
+    environment:
+      name: production
+    steps:
+      - name: Deploy to Production Environment
+        run: |
+          echo "🚀 Deploying to production environment..."
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.image-tag }}"
+          # Add your production deployment logic here

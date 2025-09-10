@@ -1,5 +1,5 @@
-# Use OpenJDK 17 with Alpine Linux (lightweight)
-FROM openjdk:17-jdk-alpine
+# Use Eclipse Temurin 17 JRE (supports ARM64 and AMD64)
+FROM eclipse-temurin:17-jre-alpine
 
 # Set working directory
 WORKDIR /app

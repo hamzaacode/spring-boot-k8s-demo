@@ -1,0 +1,25 @@
+spring:
+  application:
+    name: spring-boot-k8s-demo
+  profiles:
+    active: dev
+
+server:
+  port: 8080
+
+# Common configuration that applies to all profiles
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"
+  level:
+    com.example.user: INFO
+    org.springframework.web: INFO
